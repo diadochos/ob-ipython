@@ -43,6 +43,7 @@
 (require 'json)
 (require 'python)
 
+;;; Configuration
 ;;; variables
 
 (defcustom ob-ipython-kernel-extra-args '()
@@ -63,6 +64,12 @@
   "Path to the driver script."
   :group 'ob-ipython)
 
+(defun ob-ipython--make-execute-url (name)
+  (format "http://%s:%d/execute/%s" ob-ipython-driver-hostname ob-ipython-driver-port name))
+(defun ob-ipython--make-inspect-url (name)
+  (format "http://%s:%d/inspect/%s" ob-ipython-driver-hostname ob-ipython-driver-port name))
+
+
 ;;; utils
 
 (defun ob-ipython--write-base64-string (file b64-string)
@@ -72,7 +79,7 @@
         (base64-decode-region (point-min) (point-max))
         (let ((require-final-newline nil))
           (write-file file)))
-    (error "No output was produced to write to a file.")))
+      (error "No output was produced to write to a file.")))
 
 (defun ob-ipython--create-traceback-buffer (traceback)
   (let ((buf (get-buffer-create "*ob-ipython-traceback*")))
@@ -83,18 +90,6 @@
         (-each traceback
           (lambda (line) (insert (format "%s\n" line))))
         (ansi-color-apply-on-region (point-min) (point-max))))
-    (pop-to-buffer buf)))
-
-(defun ob-ipython--create-inspect-buffer (doc)
-  (let ((buf (get-buffer-create "*ob-ipython-inspect*")))
-    (with-current-buffer buf
-      (special-mode)
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert doc)
-        (ansi-color-apply-on-region (point-min) (point-max))
-        (whitespace-cleanup)
-        (goto-char (point-min))))
     (pop-to-buffer buf)))
 
 (defun ob-ipython--create-stdout-buffer (stdout)
@@ -195,15 +190,12 @@ a new kernel will be started."
   (let ((url-request-data code)
         (url-request-method "POST"))
     (with-current-buffer (url-retrieve-synchronously
-                          (format "http://%s:%d/execute/%s"
-                                  ob-ipython-driver-hostname
-                                  ob-ipython-driver-port
-                                  name))
+                          (ob-ipython--make-execute-url name))
       (if (>= (url-http-parse-response) 400)
           (ob-ipython--dump-error (buffer-string))
-        (goto-char url-http-end-of-headers)
-        (let ((json-array-type 'list))
-          (json-read))))))
+          (goto-char url-http-end-of-headers)
+          (let ((json-array-type 'list))
+            (json-read))))))
 
 (defun ob-ipython--extract-output (msgs)
   (->> msgs
@@ -257,14 +249,13 @@ a new kernel will be started."
         (url-request-method "POST"))
     (with-current-buffer (url-retrieve-synchronously
                           ;; TODO: hardcoded the default session here
-                          (format "http://%s:%d/inspect/default"
-                            ob-ipython-driver-hostname
-                            ob-ipython-driver-port))
+                          (ob-ipython--make-inspect-url "default")
+                          )
       (if (>= (url-http-parse-response) 400)
           (ob-ipython--dump-error (buffer-string))
-        (goto-char url-http-end-of-headers)
-        (let ((json-array-type 'list))
-          (json-read))))))
+          (goto-char url-http-end-of-headers)
+          (let ((json-array-type 'list))
+            (json-read))))))
 
 (defun ob-ipython--inspect (buffer pos)
   (let* ((code (with-current-buffer buffer
@@ -273,14 +264,14 @@ a new kernel will be started."
          (status (ob-ipython--extract-status resp)))
     (if (string= "ok" status)
         (ob-ipython--extract-result resp)
-      (error (ob-ipython--extract-error resp)))))
+        (error (ob-ipython--extract-error resp)))))
 
 (defun ob-ipython-inspect (buffer pos)
   "Ask a kernel for documentation on the thing at POS in BUFFER."
   (interactive (list (current-buffer) (point)))
   (-if-let (result (->> (ob-ipython--inspect buffer pos) (assoc 'text/plain) cdr))
-    (ob-ipython--create-inspect-buffer result)
-  (message "No documentation was found.")))
+      (ob-ipython--create-inspect-buffer result)
+    (message "No documentation was found.")))
 
 ;;; babel framework
 
@@ -358,40 +349,29 @@ VARS contains resolved variable references"
   (if (string= session "none")
       (error "ob-ipython currently only supports evaluation using a session.
 Make sure your src block has a :session param.")
-    (ob-ipython--create-driver)
-    (ob-ipython--create-kernel (ob-ipython--normalize-session session))
-    (ob-ipython--create-repl (ob-ipython--normalize-session session))))
+      (ob-ipython--create-driver)
+      (ob-ipython--create-kernel (ob-ipython--normalize-session session))
+      (ob-ipython--create-repl (ob-ipython--normalize-session session))))
 
 
 ;; Additional function for async
 
-
 (defun ob-ipython-async--execute-request (code name tempfile)
   (let ((url-request-data code)
         (url-request-method "POST")
-        (json-array-type 'list)
-        )
-
+        (json-array-type 'list))
     (with-temp-buffer tempfile
                       (url-retrieve
-                       (format "http://%s:%d/execute/%s"
-                               ob-ipython-driver-hostname
-                               ob-ipython-driver-port
-                               name)
+                       (ob-ipython--make-execute-url name)
                        (lambda (outp tfile)
                          (if (>= (url-http-parse-response) 400)
                              (ob-ipython--dump-error outp)
-                           (goto-char url-http-end-of-headers)
-                           (flush-lines "^\s*$" nil nil t)
-                           (kill-region (point) (point-min))
-                           (write-region (buffer-string) nil tfile)
-                           (ipython--async-sentinel tfile)
-                           )
-                         )
-                       (cons tempfile ())
-                       )
-                      ))
-  )
+                             (goto-char url-http-end-of-headers)
+                             (flush-lines "^\s*$" nil nil t)
+                             (kill-region (point) (point-min))
+                             (write-region (buffer-string) nil tfile)
+                             (ipython--async-sentinel tfile)))
+                       (cons tempfile ())))))
 
 (defun ipython--async-sentinel (tempfile)
   ;; Make sentinel for post url-retrive
@@ -406,9 +386,9 @@ Make sure your src block has a :session param.")
          (ltail (car (cdr tmp)))
          (org-filename (nth 1 ltail))
          (result-type (nth 2 ltail))
-         (file (nth 3 ltail))         
+         (file (nth 3 ltail))
          )
-    
+
     (setq async-list (cons (car tmp) (-drop 4 ltail)))
     (save-window-excursion
       (save-excursion
@@ -417,22 +397,22 @@ Make sure your src block has a :session param.")
             (goto-char (point-min))
             (re-search-forward tempfile)
             (beginning-of-line)
-            (kill-line)            
+            (kill-line)
             (if (> (length file) 0)
                 (insert (concat "[[file:" file "]]"))
-              (insert ": ")
-              )
-             (if (eq result-type 'output)
-                 output
-               (ob-ipython--create-stdout-buffer output)               
-               (cond ((and file (string= (f-ext file) "png"))
-                      (->> result (assoc 'image/png) cdr (ob-ipython--write-base64-string file))
-                      (org-redisplay-inline-images)
+                (insert ": ")
+                )
+            (if (eq result-type 'output)
+                output
+                (ob-ipython--create-stdout-buffer output)
+                (cond ((and file (string= (f-ext file) "png"))
+                       (->> result (assoc 'image/png) cdr (ob-ipython--write-base64-string file))
+                       (org-redisplay-inline-images)
+                       )
+                      (file (error "%s is currently an unsupported file extension." (f-ext file)))
+                      (t (insert (->> result (assoc 'text/plain) cdr)))
                       )
-                     (file (error "%s is currently an unsupported file extension." (f-ext file)))
-                     (t (insert (->> result (assoc 'text/plain) cdr)))
-                     )
-               )
+                )
             ))))
     (delete-file tempfile)
     )
@@ -445,9 +425,6 @@ Make sure your src block has a :session param.")
       (json-read))
     )
   )
-
-
-
 
 (provide 'ob-ipython)
 
